@@ -42,6 +42,11 @@ class ApiAccess
         $post_data = http_build_query($req, '', '&');
         $sign      = hash_hmac('sha512', $post_data, $api_secret);
 
+        Yii::log("Request signature: " . $_SERVER['HTTP_SIGN'], 'error');
+        Yii::log("Calculated signature: " . $sign, 'error');
+        Yii::log("API Key: " . $_SERVER['HTTP_KEY'], 'error');
+        Yii::log("Post data: " . $post_data, 'error');
+
         if ($_SERVER['HTTP_SIGN'] === $sign && $_SERVER['HTTP_KEY'] == $api_key) {
 
             if (strlen($ips_restriction)) {
@@ -62,108 +67,100 @@ class ApiAccess
 
             }
 
-            if (isset($_POST['getFields']) || isset($_POST['getModules']) || isset($_POST['getMenu'])) {
-                $_POST['action'] = 'read';
-            } else if (isset($_POST['createUser'])) {
-                $_POST['action'] = 'save';
-            }
-
             $modelUser = $modelApi->idUser;
-            if (isset($modelUser->id)) {
-
-                $this->checkPermissions($modelApi);
-
-                if (isset($_POST['createUser'])) {
-                    $this->createUser($baseController);
-                    exit;
-                }
-                if ($_POST['action'] == 'save') {
-
-                    if ((isset($_POST['id']) && is_array($_POST['id'])) || ($_POST['action'] == 'save' && isset($_POST['filter']) && strlen($_POST['filter']) > 0)) {
-                        exit('You only can edit one data per time');
-                    }
-                }
-
-                $_GET['page']  = isset($_POST['page']) ? $_POST['page'] : 1;
-                $_GET['start'] = isset($_POST['start']) ? $_POST['start'] : 0;
-                $_GET['limit'] = isset($_POST['limit']) ? $_POST['limit'] : 25;
-
-                $_GET['filter'] = isset($_POST['filter']) ? $_POST['filter'] : '';
-
-                $idUserType                          = $modelUser->idGroup->idUserType->id;
-                Yii::app()->session['isAdmin']       = $idUserType == 1 ? true : false;
-                Yii::app()->session['isAgent']       = $idUserType == 2 ? true : false;
-                Yii::app()->session['isClient']      = $idUserType == 3 ? true : false;
-                Yii::app()->session['isClientAgent'] = isset($modelUser->id_user) && $modelUser->id_user > 1 ? true : false;
-                Yii::app()->session['id_plan']       = $modelUser->id_plan;
-                Yii::app()->session['credit']        = isset($modelUser->credit) ? $modelUser->idUser->credit : 0;
-                Yii::app()->session['username']      = $modelUser->username;
-                Yii::app()->session['logged']        = true;
-                Yii::app()->session['id_user']       = $modelUser->id;
-                Yii::app()->session['id_agent']      = is_null($modelUser->id_user) ? 1 : $modelUser->id_user;
-                Yii::app()->session['name_user']     = $modelUser->firstname . ' ' . $modelUser->lastname;
-                Yii::app()->session['id_group']      = $modelUser->id_group;
-                Yii::app()->session['user_type']     = $idUserType;
-                Yii::app()->session['language']      = $modelUser->language;
-                Yii::app()->session['currency']      = $config['global']['base_currency'];
-
-                $modelGroupModule             = GroupModule::model()->getGroupModule(Yii::app()->session['id_group'], Yii::app()->session['isClient'], Yii::app()->session['id_user']);
-                Yii::app()->session['action'] = $baseController->getActions($modelGroupModule);
-
-                if (isset($_POST['getMenu']) && isset($_POST['username'])) {
-
-                    $modelUser = User::model()->find('username = :key', [':key' => $_POST['username']]);
-
-                    if (isset($modelUser->id)) {
-
-                        $modelGroupModule = GroupModule::model()->getGroupModule($modelUser->id_group, $idUserType == 3 ? true : false, $modelUser->id);
-                        echo json_encode([
-                            'menu'    => $baseController->getMenu($modelGroupModule),
-                            'actions' => $baseController->getActions($modelGroupModule),
-                        ]);
-                    } else {
-                        echo 'not found user';
-                    }
-                    exit;
-                }
-
-                if (isset($_POST['getFields'])) {
-                    if ( ! AccessManager::getInstance($_POST['module'])->canRead()) {
-                        header('HTTP/1.0 401 Unauthorized');
-                        die("Access denied in module:" . $_POST['module']);
-                    }
-                    $module = $_POST['module'];
-                    $rules  = $module::model()->rules();
-
-                    echo json_encode($rules);
-                    exit;
-
-                } else if (isset($_POST['getModules'])) {
-
-                    $dir         = '/var/www/html/mbilling/protected/controllers/';
-                    $controllers = [];
-                    foreach (scandir($dir) as $file) {
-                        $controllers[strtolower(preg_replace('/Controller\.php/', '', $file))] = lcfirst(preg_replace('/Controller\.php/', '', $file));
-                    }
-
-                    $modelGroupModule = GroupModule::model()->findAll('id_group = :key', [':key' => Yii::app()->session['id_group']]);
-                    $modules          = [];
-                    foreach ($modelGroupModule as $values) {
-                        if ($values->idModule->module != "") {
-
-                            if (isset($controllers[$values->idModule->module])) {
-                                $modules[] = ['Menu name' => substr($values->idModule->text, 3, -2), 'Module name' => $controllers[$values->idModule->module]];
-                            }
-
-                        }
-                    }
-                    exit(json_encode($modules));
-                }
-
-                return true;
-            } else {
-                exit('invalid user');
+            if (!isset($modelUser) || !isset($modelUser->id)) {
+                Yii::log("Invalid user model or missing user ID", 'error');
+                exit('invalid user configuration');
             }
+
+            // Add debug logging
+            Yii::log("User ID: " . $modelUser->id, 'error');
+            Yii::log("User Type: " . (isset($modelUser->idGroup) ? $modelUser->idGroup->id : 'null'), 'error');
+
+            $idUserType = isset($modelUser->idGroup) && isset($modelUser->idGroup->idUserType) 
+                ? $modelUser->idGroup->idUserType->id 
+                : null;
+
+            if (!$idUserType) {
+                Yii::log("Invalid user type configuration", 'error');
+                exit('invalid user type configuration');
+            }
+
+            // Initialize session variables with proper null checks
+            Yii::app()->session['isAdmin']       = $idUserType == 1 ? true : false;
+            Yii::app()->session['isAgent']       = $idUserType == 2 ? true : false;
+            Yii::app()->session['isClient']      = $idUserType == 3 ? true : false;
+            Yii::app()->session['isClientAgent'] = isset($modelUser->id_user) && $modelUser->id_user > 1 ? true : false;
+            Yii::app()->session['id_plan']       = isset($modelUser->id_plan) ? $modelUser->id_plan : null;
+            Yii::app()->session['credit']        = isset($modelUser->credit) ? $modelUser->credit : 0;
+            Yii::app()->session['username']      = isset($modelUser->username) ? $modelUser->username : '';
+            Yii::app()->session['logged']        = true;
+            Yii::app()->session['id_user']       = $modelUser->id;
+            Yii::app()->session['id_agent']      = isset($modelUser->id_user) ? $modelUser->id_user : 1;
+            Yii::app()->session['name_user']     = isset($modelUser->firstname) && isset($modelUser->lastname) 
+                ? $modelUser->firstname . ' ' . $modelUser->lastname 
+                : (isset($modelUser->username) ? $modelUser->username : '');
+            Yii::app()->session['id_group']      = isset($modelUser->id_group) ? $modelUser->id_group : null;
+            Yii::app()->session['user_type']     = $idUserType;
+            Yii::app()->session['language']      = isset($modelUser->language) ? $modelUser->language : 'en';
+            Yii::app()->session['currency']      = isset($config['global']['base_currency']) 
+                ? $config['global']['base_currency'] 
+                : 'USD';
+
+            $modelGroupModule             = GroupModule::model()->getGroupModule(Yii::app()->session['id_group'], Yii::app()->session['isClient'], Yii::app()->session['id_user']);
+            Yii::app()->session['action'] = $baseController->getActions($modelGroupModule);
+
+            if (isset($_POST['getMenu']) && isset($_POST['username'])) {
+
+                $modelUser = User::model()->find('username = :key', [':key' => $_POST['username']]);
+
+                if (isset($modelUser->id)) {
+
+                    $modelGroupModule = GroupModule::model()->getGroupModule($modelUser->id_group, $idUserType == 3 ? true : false, $modelUser->id);
+                    echo json_encode([
+                        'menu'    => $baseController->getMenu($modelGroupModule),
+                        'actions' => $baseController->getActions($modelGroupModule),
+                    ]);
+                } else {
+                    echo 'not found user';
+                }
+                exit;
+            }
+
+            if (isset($_POST['getFields'])) {
+                if ( ! AccessManager::getInstance($_POST['module'])->canRead()) {
+                    header('HTTP/1.0 401 Unauthorized');
+                    die("Access denied in module:" . $_POST['module']);
+                }
+                $module = $_POST['module'];
+                $rules  = $module::model()->rules();
+
+                echo json_encode($rules);
+                exit;
+
+            } else if (isset($_POST['getModules'])) {
+
+                $dir         = '/var/www/html/mbilling/protected/controllers/';
+                $controllers = [];
+                foreach (scandir($dir) as $file) {
+                    $controllers[strtolower(preg_replace('/Controller\.php/', '', $file))] = lcfirst(preg_replace('/Controller\.php/', '', $file));
+                }
+
+                $modelGroupModule = GroupModule::model()->findAll('id_group = :key', [':key' => Yii::app()->session['id_group']]);
+                $modules          = [];
+                foreach ($modelGroupModule as $values) {
+                    if ($values->idModule->module != "") {
+
+                        if (isset($controllers[$values->idModule->module])) {
+                            $modules[] = ['Menu name' => substr($values->idModule->text, 3, -2), 'Module name' => $controllers[$values->idModule->module]];
+                        }
+
+                    }
+                }
+                exit(json_encode($modules));
+            }
+
+            return true;
         } else {
             exit('invalid API access');
         }
